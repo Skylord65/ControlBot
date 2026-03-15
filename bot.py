@@ -65,6 +65,14 @@ async def confirmer(ctx, code: int):
     else:
         await ctx.reply("Code incorrect ou expiré.")
 
+def get_cpu_temp():
+    try:
+        with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
+            temp = int(f.read())
+        return temp / 1000.0
+    except:
+        return None
+        
 ##########################################################################
 # Status update
 ##########################################################################
@@ -73,7 +81,14 @@ async def status_update():
     vals = carte.dht_read(Temp_pin)
     humi = vals[0]
     temp = vals[1]
-    await bot.change_presence(activity=discord.Game(name=f"Température : {temp:.1f}°C, Humidité : {humi:.2f}%"))
+    cpu = get_cpu_temp()
+    if humi is None:
+        humi = "N/A"
+    if temp is None:
+        temp = "N/A"
+    if cpu is None:
+        cpu = "N/A"
+    await bot.change_presence(activity=discord.Game(name=f"CPU {cpu:.1f} | AIR {temp:.1f}°C | Humidité {humi:.2f}%"))
 
 ##########################################################################
 # à la connexion
