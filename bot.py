@@ -88,7 +88,7 @@ async def status_update():
         temp = "N/A"
     if cpu is None:
         cpu = "N/A"
-    await bot.change_presence(activity=discord.Game(name=f"CPU {cpu:.1f} | AIR {temp:.1f}°C | Humidité {humi:.2f}%"))
+    await bot.change_presence(activity=discord.Game(name=f"CPU {cpu:.1f}°C | AIR {temp:.1f}°C | Humidité {humi:.2f}%"))
 
 ##########################################################################
 # à la connexion
