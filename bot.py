@@ -1,5 +1,6 @@
 import discord
 from discord.ext import commands, tasks
+import RPi.GPIO as GPIO
 import smtplib
 from email.message import EmailMessage
 import sys
@@ -8,6 +9,38 @@ import os
 from pymata4 import pymata4
 import time
 import ffmpeg
+
+# GPIO utilisé
+FAN_PIN = 18
+# état du ventilateur
+fan_state = False
+
+def init_fan():
+    global fan_state
+
+    GPIO.setmode(GPIO.BCM)
+    GPIO.setup(FAN_PIN, GPIO.OUT)
+
+    # ventilateur éteint au démarrage
+    GPIO.output(FAN_PIN, GPIO.LOW)
+
+    fan_state = False
+
+def turn_fan_on():
+    global fan_state
+
+    GPIO.output(FAN_PIN, GPIO.HIGH)
+    fan_state = True
+
+def turn_fan_off():
+    global fan_state
+
+    GPIO.output(FAN_PIN, GPIO.LOW)
+    fan_state = False
+
+def cleanup_fan():
+    GPIO.output(FAN_PIN, GPIO.LOW)
+    GPIO.cleanup()
 
 with open("./token.txt", "r", encoding="utf-8") as fichier:
     token = fichier.readline()
@@ -80,15 +113,26 @@ def get_cpu_temp():
 async def status_update():
     vals = carte.dht_read(Temp_pin)
     humi = vals[0]
-    temp = vals[1]
+    temp = vals[1] 
     cpu = get_cpu_temp()
+    global fan_state
+
+    FAN_ON = 55
+    FAN_OFF = 45
+
+    if cpu >= FAN_ON and not fan_state:
+        turn_fan_on()
+
+    elif cpu <= FAN_OFF and fan_state:
+        turn_fan_off()
+
     if humi is None:
         humi = "N/A"
     if temp is None:
         temp = "N/A"
     if cpu is None:
         cpu = "N/A"
-    await bot.change_presence(activity=discord.Game(name=f"CPU {cpu:.1f}°C | AIR {temp:.1f}°C | Humidité {humi:.2f}%"))
+    await bot.change_presence(activity=discord.Game(name=f"CPU {cpu:.1f}°C | FAN {'ON' if fan_state else 'OFF'} | AIR {temp:.1f}°C | Humidité {humi:.2f}%"))
 
 ##########################################################################
 # à la connexion
@@ -98,6 +142,7 @@ async def on_ready():
     channel = discord.utils.get(bot.get_all_channels(), name="bot-pc")  # Remplacer "bot-pc" par le nom du salon du serveur
     await bot.get_channel(channel.id).send("Bonjour à tous !")
     print(f"{bot.user.name} est prêt.")
+    init_fan()
     status_update.start()
 
 ##########################################################################
