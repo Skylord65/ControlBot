@@ -1,40 +1,51 @@
-import discord
-from discord.ext import commands, tasks
-import RPi.GPIO as GPIO
-import smtplib
-from email.message import EmailMessage
-import sys
-from random import randint
+import asyncio
 import os
-from pymata4 import pymata4
+import smtplib
 import time
-import ffmpeg
+from email.message import EmailMessage
+from random import randint
 
-# GPIO utilisé
+import discord
+import RPi.GPIO as GPIO
+from aiohttp import web
+from discord.ext import commands, tasks
+from pymata4 import pymata4
+
+import webui
+
+##########################################################################
+# Configuration
+##########################################################################
+CHANNEL_NAME = "bot-pc"      # salon Discord utilisé pour le message de démarrage et la purge
+WEB_HOST = "0.0.0.0"         # "127.0.0.1" = accessible uniquement depuis cette machine
+WEB_PORT = 8080
+
+# GPIO utilisé pour le ventilateur
 FAN_PIN = 18
-# état du ventilateur
 fan_state = False
 
+# Broches Arduino
+Led_bleue = 13
+Servo_pin = 10
+Temp_pin = 2
+
+##########################################################################
+# Ventilateur
+##########################################################################
 def init_fan():
     global fan_state
-
     GPIO.setmode(GPIO.BCM)
     GPIO.setup(FAN_PIN, GPIO.OUT)
-
-    # ventilateur éteint au démarrage
     GPIO.output(FAN_PIN, GPIO.LOW)
-
     fan_state = False
 
 def turn_fan_on():
     global fan_state
-
     GPIO.output(FAN_PIN, GPIO.HIGH)
     fan_state = True
 
 def turn_fan_off():
     global fan_state
-
     GPIO.output(FAN_PIN, GPIO.LOW)
     fan_state = False
 
@@ -42,22 +53,58 @@ def cleanup_fan():
     GPIO.output(FAN_PIN, GPIO.LOW)
     GPIO.cleanup()
 
+##########################################################################
+# Lecture de token.txt
+# Lignes : 1 token Discord, 2 Gmail, 3 mot de passe d'app, 4 email 2FA,
+#          5 mot de passe de l'interface web (optionnel : sans lui, pas de web)
+##########################################################################
 with open("./token.txt", "r", encoding="utf-8") as fichier:
-    token = fichier.readline()
-    ##########################################################################
-    # Configuration de l'email pour la 2FA
-    ##########################################################################
-    EMAIL_ADDRESS = fichier.readline()  # Remplacez par votre adresse Gmail
-    EMAIL_PASSWORD = fichier.readline()  # Mot de passe d'application Gmail
-    AUTH_EMAIL = fichier.readline()  # Adresse email autorisée pour la vérification
+    token = fichier.readline().strip()
+    EMAIL_ADDRESS = fichier.readline().strip()
+    EMAIL_PASSWORD = fichier.readline().strip()
+    AUTH_EMAIL = fichier.readline().strip()
+    WEB_PASSWORD = fichier.readline().strip()
+
+##########################################################################
+# Bot
+##########################################################################
+class ControlBot(commands.Bot):
+    web_runner = None
+
+    async def setup_hook(self):
+        global hw_lock
+        hw_lock = asyncio.Lock()  # créé dans la boucle du bot
+        if WEB_PASSWORD:
+            app = webui.create_app(
+                WEB_PASSWORD, ACTIONS, get_status, lambda: "image.jpg"
+            )
+            self.web_runner = web.AppRunner(app)
+            await self.web_runner.setup()
+            await web.TCPSite(self.web_runner, WEB_HOST, WEB_PORT).start()
+            print(f"Interface web : http://{WEB_HOST}:{WEB_PORT}")
+        else:
+            print("Ligne 5 de token.txt absente : interface web désactivée.")
+
+    async def close(self):
+        if self.web_runner:
+            await self.web_runner.cleanup()
+            self.web_runner = None
+        await super().close()
 
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(intents=intents, command_prefix="!")
+bot = ControlBot(intents=intents, command_prefix="!")
 
-verification_codes = {}  # Stocke les codes de vérification par utilisateur
-verified_users = {}      # Stocke l'état de vérification des utilisateurs
+verification_codes = {}
+verified_users = {}
+hw_lock = None  # défini dans setup_hook
 
+# Dernières mesures, partagées entre Discord et le web
+state = {"temp": None, "humi": None, "cpu": None}
+
+##########################################################################
+# 2FA par email (Discord)
+##########################################################################
 def send_verification_email(to_email, code):
     msg = EmailMessage()
     msg.set_content(f"Votre code de vérification est : {code}")
@@ -70,84 +117,147 @@ def send_verification_email(to_email, code):
         smtp.send_message(msg)
     print(f"Code de vérification envoyé à {to_email}")
 
-##########################################################################
-# Vérificateur de 2FA pour chaque commande
-##########################################################################
 async def check_2fa(ctx):
-    if ctx.author.id not in verified_users or not verified_users[ctx.author.id]:
-        print(f"{ctx.author.name} à essayer de faire un commande mais n'est pas identifié.")
+    if not verified_users.get(ctx.author.id):
+        print(f"{ctx.author.name} a essayé de faire une commande mais n'est pas identifié.")
         return False
     return True
 
-##########################################################################
-# Commandes de vérification
-##########################################################################
 @bot.command(name="verifier")
 async def verifier(ctx):
     code = randint(100000, 999999)
     verification_codes[ctx.author.id] = code
-    send_verification_email(AUTH_EMAIL, code)  # Toujours envoyer à l'email autorisé
+    send_verification_email(AUTH_EMAIL, code)
     await ctx.reply(f"Code de vérification envoyé à {AUTH_EMAIL}. Veuillez vérifier votre boîte de réception.")
 
 @bot.command(name="confirmer")
 async def confirmer(ctx, code: int):
-    if ctx.author.id in verification_codes and verification_codes[ctx.author.id] == code:
+    if verification_codes.get(ctx.author.id) == code:
         verified_users[ctx.author.id] = True
-        del verification_codes[ctx.author.id]  # Supprime le code après vérification réussie
+        del verification_codes[ctx.author.id]
         await ctx.reply("Vérification réussie !")
     else:
         await ctx.reply("Code incorrect ou expiré.")
 
+##########################################################################
+# Actions partagées (Discord ET web)
+# Chaque action est async et protégée par hw_lock : si on clique sur le web
+# pendant qu'une commande Discord tourne, elles passent l'une après l'autre.
+# Important : asyncio.sleep (et non time.sleep) pour ne pas figer le bot
+# ni le serveur web pendant l'appui sur le bouton.
+##########################################################################
+async def action_allumer():
+    async with hw_lock:
+        carte.servo_write(Servo_pin, 130)
+        await asyncio.sleep(1)
+        carte.servo_write(Servo_pin, 90)
+    return "Appui court effectué."
+
+async def action_maintenir():
+    async with hw_lock:
+        carte.servo_write(Servo_pin, 130)
+        await asyncio.sleep(6)
+        carte.servo_write(Servo_pin, 90)
+        carte.digital_write(Led_bleue, 0)
+    return "Appui long effectué (extinction forcée)."
+
+async def action_eteindre():
+    # À compléter selon ton câblage
+    return "Extinction (non câblée pour l'instant)."
+
+async def action_picture():
+    async with hw_lock:
+        carte.digital_write(Led_bleue, 1)
+        # os.system('sudo libcamera-still -o image.jpg')
+        await asyncio.sleep(3)
+        carte.digital_write(Led_bleue, 0)
+    return "Capture prête."
+
+async def action_purger():
+    channel = discord.utils.get(bot.get_all_channels(), name=CHANNEL_NAME)
+    if channel is None:
+        raise RuntimeError(f"Salon '{CHANNEL_NAME}' introuvable")
+    await channel.purge()
+    return "Salon purgé."
+
+async def _shutdown(reboot: bool):
+    await asyncio.sleep(1)  # laisse le temps d'envoyer la réponse HTTP/Discord
+    await bot.close()
+    carte.shutdown()
+    print("--------------- Fin --------------")
+    if reboot:
+        os.system("sudo reboot")
+
+async def action_quitter():
+    asyncio.create_task(_shutdown(False))
+    return "Bot déconnecté. Bye Bye !"
+
+async def action_reboot():
+    asyncio.create_task(_shutdown(True))
+    return "Redémarrage en cours…"
+
+ACTIONS = {
+    "allumer": action_allumer,
+    "maintenir": action_maintenir,
+    "eteindre": action_eteindre,
+    "picture": action_picture,
+    "purger": action_purger,
+    "quitter": action_quitter,
+    "reboot": action_reboot,
+}
+
+def get_status():
+    return {**state, "fan": fan_state, "updated": time.time()}
+
+##########################################################################
+# Température CPU + statut
+##########################################################################
 def get_cpu_temp():
     try:
         with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
-            temp = int(f.read())
-        return temp / 1000.0
-    except:
+            return int(f.read()) / 1000.0
+    except Exception:
         return None
-        
-##########################################################################
-# Status update
-##########################################################################
+
+def fmt(value, spec):
+    return "N/A" if value is None else format(value, spec)
+
 @tasks.loop(seconds=60)
 async def status_update():
-    vals = carte.dht_read(Temp_pin)
-    humi = vals[0]
-    temp = vals[1] 
+    temp = humi = None
+    try:
+        vals = carte.dht_read(Temp_pin)
+        humi, temp = vals[0], vals[1]
+    except Exception as e:
+        print(f"Lecture DHT impossible : {e}")
     cpu = get_cpu_temp()
-    global fan_state
+    state.update(temp=temp, humi=humi, cpu=cpu)
 
-    FAN_ON = 55
-    FAN_OFF = 45
+    FAN_ON, FAN_OFF = 55, 45
+    if cpu is not None:
+        if cpu >= FAN_ON and not fan_state:
+            turn_fan_on()
+        elif cpu <= FAN_OFF and fan_state:
+            turn_fan_off()
 
-    if cpu >= FAN_ON and not fan_state:
-        turn_fan_on()
-
-    elif cpu <= FAN_OFF and fan_state:
-        turn_fan_off()
-
-    if humi is None:
-        humi = "N/A"
-    if temp is None:
-        temp = "N/A"
-    if cpu is None:
-        cpu = "N/A"
-    await bot.change_presence(activity=discord.Game(name=f"CPU {cpu:.1f}°C | FAN {'ON' if fan_state else 'OFF'} | AIR {temp:.1f}°C | Humidité {humi:.2f}%"))
+    await bot.change_presence(activity=discord.Game(
+        name=f"CPU {fmt(cpu, '.1f')}°C | FAN {'ON' if fan_state else 'OFF'} | "
+             f"AIR {fmt(temp, '.1f')}°C | Humidité {fmt(humi, '.2f')}%"
+    ))
 
 ##########################################################################
-# à la connexion
+# Événements
 ##########################################################################
 @bot.event
 async def on_ready():
-    channel = discord.utils.get(bot.get_all_channels(), name="bot-pc")  # Remplacer "bot-pc" par le nom du salon du serveur
-    await bot.get_channel(channel.id).send("Bonjour à tous !")
+    channel = discord.utils.get(bot.get_all_channels(), name=CHANNEL_NAME)
+    if channel:
+        await channel.send("Bonjour à tous !")
     print(f"{bot.user.name} est prêt.")
-    init_fan()
-    status_update.start()
+    if not status_update.is_running():  # on_ready peut être rappelé après une reconnexion
+        init_fan()
+        status_update.start()
 
-##########################################################################
-# en cas d'erreur
-##########################################################################
 @bot.event
 async def on_command_error(ctx, error):
     if await check_2fa(ctx):
@@ -157,149 +267,58 @@ async def on_command_error(ctx, error):
             raise error
 
 ##########################################################################
-# Test bot
+# Commandes Discord (déléguent aux actions partagées)
 ##########################################################################
 @bot.command(name="hello")
 async def hello(ctx):
     if await check_2fa(ctx):
         await ctx.reply(f"hello, {ctx.author.name}")
 
-##########################################################################
-# allumer
-##########################################################################
 @bot.command(name="allumer")
-async def allumer(ctx):
+async def cmd_allumer(ctx):
     if await check_2fa(ctx):
-        reponse = "Led allumé."
-        await ctx.reply(reponse)
-        # carte.digital_write(Led_bleue, 1)
-        carte.servo_write(Servo_pin, 130)
-        time.sleep(1)
-        carte.servo_write(Servo_pin, 90)
-        print(f"Réponse à message {ctx.message.id} : {reponse}")
+        await ctx.reply("Led allumé.")
+        await action_allumer()
 
-##########################################################################
-# maintenir
-##########################################################################
 @bot.command(name="maintenir")
-async def allumer(ctx):
+async def cmd_maintenir(ctx):
     if await check_2fa(ctx):
-        reponse = "Led éteinte de force"
-        await ctx.reply(reponse)
-        # carte.digital_write(Led_bleue, 1)
-        carte.servo_write(Servo_pin, 130)
-        time.sleep(6)
-        carte.servo_write(Servo_pin, 90)
-        carte.digital_write(Led_bleue, 0)
-        print(f"Réponse à message {ctx.message.id} : {reponse}")
+        await ctx.reply("Led éteinte de force")
+        await action_maintenir()
 
-##########################################################################
-# eteindre
-##########################################################################
 @bot.command(name="eteindre")
-async def eteindre(ctx):
+async def cmd_eteindre(ctx):
     if await check_2fa(ctx):
-        reponse = "Led éteinte."
-        await ctx.reply(reponse)
-        # carte.digital_write(Led_bleue, 0)
-        print(f"Réponse à message {ctx.message.id} : {reponse}")
-############################################################################
-# Curl Led Cam (commande optionnelle pour allumer/éteindre la led de la cam
-# changer <url_led_de_la_cam> avec la vrai url de votre cam
-############################################################################
-#@bot.command(name="curl")
-#async def curl(ctx):
-#	reponse = "Led dans son état opposé"
-#	await ctx.reply(reponse)
-#	print(f"Reponse à message {ctx.message.id} : {reponse}"
-#	os.system("curl <url_led_de_la_cam>")
-#
-##########################################################################
-# quitter
-##########################################################################
+        await ctx.reply(await action_eteindre())
+
 @bot.command(name="quitter")
-async def quitter(ctx):
+async def cmd_quitter(ctx):
     if await check_2fa(ctx):
-        reponse = "Bot déconnecté. Bye Bye !"
-        await ctx.reply(reponse)
-        await bot.close()
-        carte.shutdown()
-        print(f"Réponse à message {ctx.message.id} : {reponse}")
-        print("--------------- Fin --------------")
+        await ctx.reply(await action_quitter())
 
-##########################################################################
-# reboot
-##########################################################################
 @bot.command(name="reboot")
-async def quitter(ctx):
+async def cmd_reboot(ctx):
     if await check_2fa(ctx):
-        reponse = "Bot déconnecté il va redémarrer dans quelque instants. A de suite !"
-        await ctx.reply(reponse)
-        await bot.close()
-        carte.shutdown()
-        print(f"Réponse à message {ctx.message.id} : {reponse}")
-        print("--------------- Fin --------------")
-        os.system("sudo reboot")
+        await ctx.reply("Bot déconnecté il va redémarrer dans quelques instants. À de suite !")
+        await action_reboot()
 
-##########################################################################
-# Supprimer tous les messages : !purger
-##########################################################################
 @bot.command(name="purger")
 async def purge(ctx):
     if await check_2fa(ctx):
         await ctx.channel.purge()
 
-##########################################################################
-# Envoyer une image
-##########################################################################
 @bot.command(name="picture")
 async def picture(ctx):
     if await check_2fa(ctx):
-        carte.digital_write(Led_bleue, 1)
-        #await ctx.reply('Capture de la cam...')
-        #os.system('sudo libcamera-still -o image.jpg')
-        time.sleep(3)
-        await ctx.reply('envoie de la capture :')
-        await ctx.channel.send(file=discord.File('image.jpg'))
-        carte.digital_write(Led_bleue, 0)
-
-#############################################################################
-# Stream motion_eye (pour utilisation compléter <url_stream> et <id_channel>
-#############################################################################
-#@bot.command(name="stream")
-#async def stream(ctx):
-#    """Commande pour démarrer le streaming"""
-#    if ctx.voice_client:  # Vérifie si le bot est déjà dans un canal vocal
-#        await ctx.voice_client.disconnect()
-#
-#    channel = bot.get_channel(<id_channel>)
-#    if isinstance(channel, discord.VoiceChannel):
-#        vc = await channel.connect()
-#        ffmpeg_process = (
-#            ffmpeg
-#            .input("<url_stream>")
-#            .output("pipe:1", format="opus", acodec="libopus", audio_bitrate="64k")
-#            .run_async(pipe_stdout=True)
-#        )
-#
-#        while not ffmpeg_process.poll():
-#            data = ffmpeg_process.stdout.read(4000)
-#            if vc.is_connected():
-#                vc.send_audio_packet(data)
-#            await asyncio.sleep(0.02)
-#
-#        await vc.disconnect()
+        await action_picture()
+        await ctx.reply("envoi de la capture :")
+        await ctx.channel.send(file=discord.File("image.jpg"))
 
 ##########################################################################
-# Initialisations de Pymata et exécution du bot
+# Initialisation Pymata et exécution du bot
 ##########################################################################
 carte = pymata4.Pymata4()
 print("--------------- Début --------------")
-
-# Constantes
-Led_bleue = 13  # Led
-Servo_pin = 10
-Temp_pin = 2
 
 carte.set_pin_mode_dht(Temp_pin, sensor_type=11)
 carte.set_pin_mode_digital_output(Led_bleue)
@@ -309,4 +328,3 @@ carte.servo_write(Servo_pin, 90)
 time.sleep(3)
 
 bot.run(token)
-

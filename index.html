@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ControlBot</title>
+  <!-- theme.css = ta DA (couleurs, polices) ; style.css = la structure -->
+  <link rel="stylesheet" href="/static/theme.css">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<main>
+
+  <!-- Connexion -->
+  <section id="login-view" class="card" hidden>
+    <h1 style="margin-bottom:16px">ControlBot</h1>
+    <form id="login-form">
+      <input id="password" type="password" placeholder="Mot de passe" autocomplete="current-password" required>
+      <button class="primary" type="submit">Se connecter</button>
+    </form>
+  </section>
+
+  <!-- Tableau de bord -->
+  <div id="app-view" hidden>
+    <header>
+      <h1><span id="live-dot" class="dot"></span>ControlBot</h1>
+      <button class="ghost" id="logout">Déconnexion</button>
+    </header>
+
+    <section class="card">
+      <h2>Statut</h2>
+      <div class="grid stats">
+        <div class="stat"><div class="label">CPU</div><div class="value" id="s-cpu">–</div></div>
+        <div class="stat"><div class="label">Ventilateur</div><div class="value" id="s-fan">–</div></div>
+        <div class="stat"><div class="label">Température air</div><div class="value" id="s-temp">–</div></div>
+        <div class="stat"><div class="label">Humidité</div><div class="value" id="s-humi">–</div></div>
+      </div>
+      <p class="muted" id="s-updated" style="margin-top:12px"></p>
+    </section>
+
+    <section class="card">
+      <h2>Contrôle</h2>
+      <div class="grid actions">
+        <button class="primary" data-action="allumer">Allumer</button>
+        <button data-action="maintenir">Maintenir (6 s)</button>
+        <button data-action="eteindre">Éteindre</button>
+        <button data-action="picture" id="btn-picture">Prendre une photo</button>
+      </div>
+      <img id="photo" alt="Dernière capture" hidden>
+    </section>
+
+    <section class="card">
+      <h2>Administration</h2>
+      <div class="grid actions">
+        <button data-action="purger" data-confirm="Supprimer tous les messages du salon ?">Purger le salon</button>
+        <button class="danger" data-action="reboot" data-confirm="Redémarrer la machine ?">Redémarrer</button>
+        <button class="danger" data-action="quitter" data-confirm="Arrêter le bot ?">Arrêter le bot</button>
+      </div>
+    </section>
+  </div>
+
+</main>
+<div id="toast"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

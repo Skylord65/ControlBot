@@ -1,6 +1,6 @@
 # 🤖 ControlBot – Contrôle Domotique via Arduino
 
-Un bot Discord permettant de contrôler à distance des composants matériels (servo-moteur, LED, capteur DHT) connectés à un Arduino, avec authentification à deux facteurs (2FA) par email.
+Un bot Discord avec interface web permettant de contrôler à distance des composants matériels (servo-moteur, LED, capteur DHT) connectés à un Arduino, avec authentification à deux facteurs (2FA) par email.
 
 ---
 
@@ -15,6 +15,7 @@ Un bot Discord permettant de contrôler à distance des composants matériels (s
 - [Commandes disponibles](#-commandes-disponibles)
 - [Authentification 2FA](#-authentification-2fa)
 - [Lancement du bot](#-lancement-du-bot)
+- [Utilisation de l'interface web](#-utilisation-de-linterface-web)
 - [Notes et limitations](#-notes-et-limitations)
 
 ---
@@ -30,6 +31,7 @@ Un bot Discord permettant de contrôler à distance des composants matériels (s
 - Stream audio depuis un flux HTTP (MotionEye, pas fonctionnel pour le moment)
 - Purge des messages du salon
 - Redémarrage ou arrêt du bot à distance
+- Controle depuis une interface web
 
 ---
 
@@ -94,6 +96,7 @@ Récapitulatif des bibliothèques utilisées :
 | `pymata4` | Communication avec l'Arduino via Firmata |
 | `ffmpeg-python` | Wrapper Python pour ffmpeg (stream audio) |
 | `smtplib` | Envoi d'emails (inclus dans la bibliothèque standard Python) |
+| `aiohttp` | Permet la gestion d'un serveur web pour l'interface web |
 
 ---
 
@@ -101,13 +104,14 @@ Récapitulatif des bibliothèques utilisées :
 
 Le fichier `token.txt` doit être créé manuellement au même endroit que le code du bot discord et **ne doit jamais être partagé ni versionné** (ajoutez-le à votre `.gitignore`).
 
-Il doit contenir **exactement 4 lignes**, dans cet ordre :
+Il doit contenir **exactement 5 lignes**, dans cet ordre :
 
 ```
 VOTRE_TOKEN_DISCORD
 votre.email.gmail@gmail.com
 votre_mot_de_passe_application_gmail
 email.autorise.reception.codes@gmail.com
+mot_de_passe_web
 ```
 
 | Ligne | Contenu |
@@ -116,6 +120,7 @@ email.autorise.reception.codes@gmail.com
 | **2** | L'adresse Gmail depuis laquelle les codes 2FA sont envoyés |
 | **3** | Le mot de passe d'application Gmail (pas votre mot de passe habituel) |
 | **4** | L'adresse email qui **recevra** les codes de vérification 2FA |
+| **5** | Le mot de passe pour l'interface web, sans celui-ci l'interface ne se lancera pas |
 
 > 💡 Les lignes sont lues avec `readline()`, donc chaque valeur doit être sur sa propre ligne, **sans ligne vide entre elles**.
 
@@ -145,7 +150,7 @@ Arduino
 
 ## 💬 Commandes disponibles
 
-> Toutes les commandes (sauf `!verifier` et `!confirmer`) nécessitent une authentification 2FA préalable.
+> Toutes les commandes (sauf `!verifier` et `!confirmer`) nécessitent une authentification 2FA préalable ou alors de ce connecter sur l'interface web avec sur l'ip locale avec le port défini.
 
 ### Authentification
 
@@ -178,6 +183,9 @@ Arduino
 | `!quitter` | Déconnecte proprement le bot et l'Arduino |
 | `!reboot` | Redémarre la machine hôte (`sudo reboot`) |
 
+
+> **Remarque** : l'entiereté des commandes ci-dessus peuvent aussi être lancées depuis l'interface web. 
+
 ---
 
 ## 🔐 Authentification 2FA
@@ -209,10 +217,29 @@ Pour un lancement automatique au démarrage du Raspberry Pi, vous pouvez créer 
 
 ---
 
+## 📊 Utilisation de l'interface web
+
+### Lancement
+
+L'interface web se lancera automatiquement au lancement du bot sur l'adresse `http://localhost:{WEB_PORT}`. Le port par défault est 8080 mais il peut être changé en modifiant la contante `WEB_PORT`.
+
+### Connexion à l'interface
+
+Pour se connecter une fois lancer il suffit de tapez le mot de passe initialement entré dans la **5e ligne** du `token.txt`.
+
+> **Attention** : si la **5e ligne** du `token.txt` est vide l'interface ne marchera pas.
+
+### Utilisation
+
+Sur l'interface web il est possible d'executer toutes les commandes possible depuis le bot discord, celle-ci sert de plan B dans le cas ou le bot discord ne marcherait plus.
+
+---
+
 ## 📝 Notes et limitations
 
 - Le fichier `image.jpg` utilisé par `!picture` doit être généré au préalable (ex: via `libcamera-still`). La ligne de capture est commentée dans le code et peut être réactivée.
-- La commande `!stream` nécessite que MotionEye soit actif sur `http://loacalhost:9061` — adaptez l'IP à votre réseau.
+- La commande `!stream` nécessite que MotionEye soit actif sur `http://localhost:9061` — adaptez l'IP à votre réseau (non fonctionnel pour le moment).
 - La commande `!reboot` exécute `sudo reboot` sans confirmation. Assurez-vous que l'utilisateur qui lance le bot a les droits sudo nécessaires.
 - Les codes de vérification expirent à la prochaine tentative incorrecte ou au redémarrage du bot.
 - Ce projet est prévu pour un usage **personnel et local**, ne l'exposez pas publiquement sans mesures de sécurité supplémentaires.
+- L'interface web et le bot discord tourne en parallèle, ne pas lancer webui.py seul, bot.py s'en occupera.
