@@ -58,7 +58,7 @@ def cleanup_fan():
 # Lignes : 1 token Discord, 2 Gmail, 3 mot de passe d'app, 4 email 2FA,
 #          5 mot de passe de l'interface web (optionnel : sans lui, pas de web)
 ##########################################################################
-with open("./token.txt", "r", encoding="utf-8") as fichier:
+with open("./ControlBot/token.txt", "r", encoding="utf-8") as fichier:
     token = fichier.readline().strip()
     EMAIL_ADDRESS = fichier.readline().strip()
     EMAIL_PASSWORD = fichier.readline().strip()
